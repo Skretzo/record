@@ -28,6 +28,7 @@
   </div>
 
   <div class="status" id="status">Idle</div>
+  <a id="downloadLink" style="display:none">Download recording</a>
 
   <video id="preview" autoplay muted playsinline style="display:none;"></video>
   <video id="playbackVideo" controls style="display:none;"></video>
@@ -38,6 +39,7 @@
     const stopBtn = document.getElementById('stopBtn');
     const statusEl = document.getElementById('status');
     const preview = document.getElementById('preview');
+    const downloadLink = document.getElementById('downloadLink');
     const playbackVideo = document.getElementById('playbackVideo');
     const playbackAudio = document.getElementById('playbackAudio');
 
@@ -119,6 +121,7 @@
 
     startBtn.addEventListener('click', async () => {
       recordedChunks = [];
+      downloadLink.style.display = 'none';
       playbackVideo.style.display = 'none';
       playbackVideo.src = '';
       playbackAudio.style.display = 'none';
@@ -222,16 +225,16 @@
         // if (save) {
         const ext = blob.type.includes('video') ? 'webm' : 'webm';
         const suggestedName = `recording-${new Date().toISOString().replace(/[:.]/g,'-')}.${ext}`;
-        const a = document.createElement('a');
-        a.style.display = 'none';
-        a.href = URL.createObjectURL(blob);
-        a.download = suggestedName;
-        document.body.appendChild(a);
-        a.click();
+        //const downloadLink = document.createElement('a');
+        downloadLink.style.display = '';
+        downloadLink.href = URL.createObjectURL(blob);
+        downloadLink.download = suggestedName;
+        //document.body.appendChild(a);
+        downloadLink.click();
         setTimeout(() => {
-          URL.revokeObjectURL(a.href);
-          document.body.removeChild(a);
-        }, 1000);
+          URL.revokeObjectURL(downloadLink.href);
+          //document.body.removeChild(downloadLink);
+        }, 60 * 1000);
       };
 
       mediaRecorder.start();
