@@ -3,158 +3,248 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>WebM Opus Recorder</title>
+  <title>Record</title>
   <style>
-    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; padding: 24px; max-width: 720px; margin: auto; }
-    button { margin: 8px 8px 8px 0; padding: 10px 14px; font-size: 14px; }
-    #status { margin-top: 12px; color: #333; }
-    #downloadLink { display:block; margin-top:12px; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; padding: 20px; max-width: 820px; margin: auto; }
+    .mode { display:flex; gap:12px; margin-top:8px; align-items:center; }
+    label { display:inline-flex; gap:8px; align-items:center; cursor:pointer; }
+    button { margin-right:8px; margin-top:12px; }
+    video, audio { display:block; margin-top:12px; max-width:100%; border:1px solid #ddd; }
+    .status { margin-top:12px; font-weight:600; }
   </style>
 </head>
 <body>
-  <h3>Audio Recorder audio/webm Opus</h3>
+  <h3>Record</h3>
 
-  <p>
-    <button id="requestMic">Request Microphone</button>
-    <button id="startBtn" disabled>Start Recording</button>
-    <button id="stopBtn" disabled>Stop & Save</button>
-  </p>
+  <div>
+    <label><input type="radio" name="mode" value="audio" checked /> Only audio (microphone)</label><br>
+    <label><input type="radio" name="mode" value="video" /> Only video (screen)</label><br>
+    <label><input type="radio" name="mode" value="both" /> Video and audio (screen and microphone)</label>
+  </div>
 
-  <div id="status">Microphone not requested.</div>
-  <a id="downloadLink" style="display:none">Download recording</a>
+  <div>
+    <button id="startBtn">Start recording</button>
+    <button id="stopBtn" disabled>Stop recording</button>
+  </div>
+
+  <div class="status" id="status">Idle</div>
+
+  <video id="preview" autoplay muted playsinline style="display:none;"></video>
+  <video id="playbackVideo" controls style="display:none;"></video>
+  <audio id="playbackAudio" controls style="display:none;"></audio>
 
   <script>
-    // Elements
-    const requestMicBtn = document.getElementById('requestMic');
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
-    const status = document.getElementById('status');
-    const downloadLink = document.getElementById('downloadLink');
+    const statusEl = document.getElementById('status');
+    const preview = document.getElementById('preview');
+    const playbackVideo = document.getElementById('playbackVideo');
+    const playbackAudio = document.getElementById('playbackAudio');
 
-    // State
-    let mediaStream = null;
+    let micStream = null;
+    let screenStream = null;
+    let mixedStream = null;
     let mediaRecorder = null;
-    let chunks = [];
-    const MIME_TYPE = 'audio/webm;codecs=opus';
+    let recordedChunks = [];
+    let recordingMime = '';
 
-    // Request microphone permission and prepare stream
-    requestMicBtn.addEventListener('click', async () => {
-      try {
-        status.textContent = 'Requesting microphone permission...';
-        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        status.textContent = 'Microphone ready. You can start recording.';
-        startBtn.disabled = false;
-      } catch (err) {
-        console.error('getUserMedia error', err);
-        status.textContent = 'Microphone access denied or error occurred.';
+    function updateStatus(t) { statusEl.textContent = t; }
+
+    function getSelectedMode() {
+      const r = document.querySelector('input[name="mode"]:checked');
+      return r ? r.value : 'audio';
+    }
+
+    const preferredTypes = [
+      'video/webm;codecs=vp9,opus',
+      'video/webm;codecs=vp8,opus',
+      'video/webm;codecs=vp8',
+      'video/webm',
+      'audio/webm'
+    ];
+
+    function chooseMime() {
+      for (const t of preferredTypes) {
+        if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) return t;
       }
-    });
+      return '';
+    }
 
-    // Start recording
-    startBtn.addEventListener('click', () => {
-      if (!mediaStream) {
-        status.textContent = 'No microphone stream available. Click Request Microphone first.';
+    function buildMixedStream(screen, mic, mode) {
+      const out = new MediaStream();
+
+      if (mode === 'audio') {
+        if (mic) mic.getAudioTracks().forEach(t => out.addTrack(t));
+        return out;
+      }
+
+      if (mode === 'video') {
+        if (screen && screen.getVideoTracks().length) screen.getVideoTracks().forEach(t => out.addTrack(t));
+        // include screen audio if provided by getDisplayMedia
+        if (screen && screen.getAudioTracks().length) screen.getAudioTracks().forEach(t => out.addTrack(t));
+        return out;
+      }
+
+      // both
+      if (screen && screen.getVideoTracks().length) screen.getVideoTracks().forEach(t => out.addTrack(t));
+      // include screen audio if available
+      if (screen && screen.getAudioTracks().length) screen.getAudioTracks().forEach(t => out.addTrack(t));
+      // include mic audio
+      if (mic && mic.getAudioTracks().length) mic.getAudioTracks().forEach(t => out.addTrack(t));
+      return out;
+    }
+
+    function stopAllStreams() {
+      [micStream, screenStream, mixedStream].forEach(s => {
+        if (s) s.getTracks().forEach(t => {
+          try { t.stop(); } catch (e) {}
+        });
+      });
+      micStream = screenStream = mixedStream = null;
+    }
+
+    function hookDisplayEnd(display) {
+      if (!display) return;
+      display.getVideoTracks().forEach(track => {
+        track.addEventListener('ended', () => {
+          if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+        });
+      });
+      display.getAudioTracks().forEach(track => {
+        track.addEventListener('ended', () => {
+          if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+        });
+      });
+    }
+
+    startBtn.addEventListener('click', async () => {
+      recordedChunks = [];
+      playbackVideo.style.display = 'none';
+      playbackVideo.src = '';
+      playbackAudio.style.display = 'none';
+      playbackAudio.src = '';
+      preview.style.display = 'none';
+      preview.srcObject = null;
+      updateStatus('Requesting permissions...');
+
+      const mode = getSelectedMode();
+
+      // Request mic only if needed
+      try {
+        if (mode === 'audio' || mode === 'both') {
+          micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        } else {
+          micStream = null;
+        }
+      } catch (err) {
+        updateStatus('Microphone access denied or unavailable: ' + (err && err.message ? err.message : err));
         return;
       }
-      // Ensure requested MIME type is supported
-      if (!MediaRecorder.isTypeSupported(MIME_TYPE)) {
-        status.textContent = `Desired MIME type ${MIME_TYPE} not supported in this browser.`;
-        // Still try with default if possible
-      }
+
+      // Request screen if needed
       try {
-        chunks = [];
-        mediaRecorder = new MediaRecorder(mediaStream, { mimeType: MIME_TYPE });
-      } catch (err) {
-        // fallback: try without explicit mimeType
-        try {
-          mediaRecorder = new MediaRecorder(mediaStream);
-        } catch (err2) {
-          console.error('MediaRecorder creation failed', err2);
-          status.textContent = 'Unable to create MediaRecorder on this browser.';
-          return;
+        if (mode === 'video' || mode === 'both') {
+          // audio:true here allows capturing system audio on platforms that support it
+          screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+          hookDisplayEnd(screenStream);
+        } else {
+          screenStream = null;
         }
+      } catch (err) {
+        if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+        updateStatus('Screen capture denied or unavailable: ' + (err && err.message ? err.message : err));
+        return;
       }
 
-      mediaRecorder.ondataavailable = e => {
-        if (e.data && e.data.size > 0) chunks.push(e.data);
+      // Build the stream we will feed MediaRecorder
+      mixedStream = buildMixedStream(screenStream, micStream, mode);
+
+      // Show preview for video modes
+      if ((mode === 'video' || mode === 'both') && screenStream && screenStream.getVideoTracks().length) {
+        preview.style.display = '';
+        preview.srcObject = screenStream;
+      } else {
+        preview.style.display = 'none';
+      }
+
+      // Choose mime
+      recordingMime = chooseMime();
+      const recorderOptions = recordingMime ? { mimeType: recordingMime } : undefined;
+
+      try {
+        mediaRecorder = new MediaRecorder(mixedStream, recorderOptions);
+      } catch (err) {
+        updateStatus('MediaRecorder initialization failed: ' + (err && err.message ? err.message : err));
+        stopAllStreams();
+        return;
+      }
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) recordedChunks.push(e.data);
       };
 
       mediaRecorder.onstart = () => {
-        status.textContent = 'Recording...';
+        updateStatus('Recording...');
         startBtn.disabled = true;
         stopBtn.disabled = false;
-        requestMicBtn.disabled = true;
-        downloadLink.style.display = 'none';
       };
 
       mediaRecorder.onstop = async () => {
-        status.textContent = 'Recording stopped. Preparing file...';
-        const blob = new Blob(chunks, { type: MIME_TYPE });
-        await saveBlobToFile(blob);
-        status.textContent = 'File saved or download ready.';
+        updateStatus('Stopped recording');
         startBtn.disabled = false;
         stopBtn.disabled = true;
-        requestMicBtn.disabled = false;
-      };
 
-      mediaRecorder.onerror = ev => {
-        console.error('MediaRecorder error', ev);
-        status.textContent = 'Recording error occurred.';
+        // Stop streams
+        stopAllStreams();
+
+        const blobType = recordingMime || (mode === 'audio' ? 'audio/webm' : 'video/webm');
+        const blob = new Blob(recordedChunks, { type: blobType });
+
+        // Playback
+        if (mode === 'video' || mode === 'both') {
+          //const v = document.createElement('video');
+          //v.controls = true;
+          //v.style.maxWidth = '100%';
+          //v.src = URL.createObjectURL(blob);
+          // replace preview with playback
+          preview.style.display = 'none';
+          //if (playback.parentNode) playback.parentNode.insertBefore(v, playback);
+          playbackVideo.style.display = '';
+          playbackVideo.src = URL.createObjectURL(blob);
+          playbackAudio.style.display = 'none';
+        } else {
+          playbackAudio.style.display = '';
+          playbackAudio.src = URL.createObjectURL(blob);
+        }
+
+        // Save
+        // const save = confirm('Save recording to a file?');
+        // if (save) {
+        const ext = blob.type.includes('video') ? 'webm' : 'webm';
+        const suggestedName = `recording-${new Date().toISOString().replace(/[:.]/g,'-')}.${ext}`;
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = URL.createObjectURL(blob);
+        a.download = suggestedName;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+          URL.revokeObjectURL(a.href);
+          document.body.removeChild(a);
+        }, 1000);
       };
 
       mediaRecorder.start();
     });
 
-    // Stop recording and save
     stopBtn.addEventListener('click', () => {
-      if (mediaRecorder && mediaRecorder.state === 'recording') {
-        mediaRecorder.stop();
-      } else {
-        status.textContent = 'No active recording to stop.';
-      }
+      if (!mediaRecorder) return;
+      if (mediaRecorder.state !== 'inactive') mediaRecorder.stop();
     });
 
-    // Save using File System Access API if available, else fallback to anchor download
-    async function saveBlobToFile(blob) {
-      const defaultName = `recording-${new Date().toISOString().replace(/[:.]/g,'-')}.webm`;
-      // File System Access API (showSaveFilePicker)
-      if (window.showSaveFilePicker) {
-        try {
-          const opts = {
-            suggestedName: defaultName,
-            types: [{
-              description: 'WebM audio',
-              accept: { 'audio/webm': ['.webm'] }
-            }]
-          };
-          const handle = await window.showSaveFilePicker(opts);
-          const writable = await handle.createWritable();
-          await writable.write(blob);
-          await writable.close();
-          return;
-        } catch (err) {
-          console.error('showSaveFilePicker error or aborted', err);
-          // Fall through to fallback download
-        }
-      }
-
-      // Fallback: create object URL and provide a download link
-      const url = URL.createObjectURL(blob);
-      downloadLink.href = url;
-      downloadLink.download = defaultName;
-      downloadLink.textContent = 'Click here to download the recording';
-      downloadLink.style.display = 'inline-block';
-      // Optionally auto-click to start download immediately:
-      // downloadLink.click();
-      // Revoke URL after some time
-      setTimeout(() => URL.revokeObjectURL(url), 60 * 1000);
-    }
-
-    // Clean up when page unloads
     window.addEventListener('beforeunload', () => {
-      if (mediaStream) {
-        mediaStream.getTracks().forEach(t => t.stop());
-      }
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+      stopAllStreams();
     });
   </script>
 </body>
