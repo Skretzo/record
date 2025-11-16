@@ -58,10 +58,12 @@
     }
 
     const preferredTypes = [
+      'video/mp4',
       'video/webm;codecs=vp9,opus',
       'video/webm;codecs=vp8,opus',
       'video/webm;codecs=vp8',
       'video/webm',
+      'audio/mp4',
       'audio/webm'
     ];
 
@@ -220,13 +222,7 @@
 
         // Playback
         if (mode === 'video' || mode === 'both') {
-          //const v = document.createElement('video');
-          //v.controls = true;
-          //v.style.maxWidth = '100%';
-          //v.src = URL.createObjectURL(blob);
-          // replace preview with playback
           preview.style.display = 'none';
-          //if (playback.parentNode) playback.parentNode.insertBefore(v, playback);
           playbackVideo.style.display = '';
           playbackVideo.src = URL.createObjectURL(blob);
           playbackAudio.style.display = 'none';
@@ -236,19 +232,14 @@
         }
 
         // Save
-        // const save = confirm('Save recording to a file?');
-        // if (save) {
-        const ext = blob.type.includes('video') ? 'webm' : 'webm';
+        const ext = (recordingMime && recordingMime.includes("mp4")) ? 'mp4' : 'webm';
         const suggestedName = `recording-${new Date().toISOString().replace(/[:.]/g,'-')}.${ext}`;
-        //const downloadLink = document.createElement('a');
         downloadLink.style.display = '';
         downloadLink.href = URL.createObjectURL(blob);
         downloadLink.download = suggestedName;
-        //document.body.appendChild(a);
         downloadLink.click();
         setTimeout(() => {
           URL.revokeObjectURL(downloadLink.href);
-          //document.body.removeChild(downloadLink);
         }, 60 * 1000);
       };
 
