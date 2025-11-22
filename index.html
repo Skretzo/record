@@ -23,16 +23,21 @@
   </div>
 
   <div>
+    <label><input type="checkbox" id="combineAudio" checked /> Combine screen and microphone audio</label>
+  </div>
+
+  <div>
     <button id="startBtn">Start recording</button>
     <button id="stopBtn" disabled>Stop recording</button>
   </div>
 
   <div class="status" id="status">Idle</div>
   <a id="downloadLink" style="display:none">Download recording</a>
+  <a id="downloadLinkExtra" style="display:none">Download microphone recording</a>
 
   <video id="preview" autoplay muted playsinline style="display:none;"></video>
-  <video id="playbackVideo" controls style="display:none;"></video>
   <audio id="playbackAudio" controls style="display:none;"></audio>
+  <video id="playbackVideo" controls style="display:none;"></video>
 
   <script>
     const startBtn = document.getElementById('startBtn');
@@ -40,14 +45,18 @@
     const statusEl = document.getElementById('status');
     const preview = document.getElementById('preview');
     const downloadLink = document.getElementById('downloadLink');
-    const playbackVideo = document.getElementById('playbackVideo');
+    const downloadLinkExtra = document.getElementById('downloadLinkExtra');
     const playbackAudio = document.getElementById('playbackAudio');
+    const playbackVideo = document.getElementById('playbackVideo');
+    const combineAudio = document.getElementById('combineAudio');
 
     let micStream = null;
     let screenStream = null;
     let mixedStream = null;
     let mediaRecorder = null;
+    let mediaRecorderExtra = null;
     let recordedChunks = [];
+    let recordedChunksExtra = [];
     let recordingMime = '';
 
     function updateStatus(t) { statusEl.textContent = t; }
@@ -67,6 +76,11 @@
       'audio/webm'
     ];
 
+    const preferredTypesExtra = [
+      'audio/mp4',
+      'audio/webm'
+    ];
+
     function chooseMime() {
       for (const t of preferredTypes) {
         if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) return t;
@@ -74,19 +88,26 @@
       return '';
     }
 
-    function buildMixedStream(screen, mic, mode) {
+    function chooseMimeExtra() {
+      for (const t of preferredTypesExtra) {
+        if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) return t;
+      }
+      return '';
+    }
+
+    function buildMixedStream(screen, mic, mode, combine) {
       const out = new MediaStream();
 
       if (mode === 'audio') {
         if (mic) mic.getAudioTracks().forEach(t => out.addTrack(t));
-        return out;
+        return [out];
       }
 
       if (mode === 'video') {
         if (screen && screen.getVideoTracks().length) screen.getVideoTracks().forEach(t => out.addTrack(t));
         // include screen audio if provided by getDisplayMedia
         if (screen && screen.getAudioTracks().length) screen.getAudioTracks().forEach(t => out.addTrack(t));
-        return out;
+        return [out];
       }
 
       // both
@@ -94,15 +115,22 @@
 
       // combine screen and voice audio if both are available (having 2 separate tracks does not work)
       if (screen && mic && screen.getAudioTracks().length && mic.getAudioTracks().length) {
-        const audioContext = new AudioContext();
-        const combined = audioContext.createMediaStreamDestination();
+        if (combine) {
+          const audioContext = new AudioContext();
+          const combined = audioContext.createMediaStreamDestination();
 
-        audioContext.createMediaStreamSource(screen).connect(combined);
-        audioContext.createMediaStreamSource(mic).connect(combined);
+          audioContext.createMediaStreamSource(screen).connect(combined);
+          audioContext.createMediaStreamSource(mic).connect(combined);
 
-        combined.stream.getAudioTracks().forEach(t => out.addTrack(t));
+          combined.stream.getAudioTracks().forEach(t => out.addTrack(t));
 
-        return out;
+          return [out];
+        } else { // make an extra audio file for the microphone
+          const outExtra = new MediaStream();
+          screen.getAudioTracks().forEach(t => out.addTrack(t));
+          mic.getAudioTracks().forEach(t => outExtra.addTrack(t));
+          return [out, outExtra]
+        }
       }
 
       // include screen audio if available
@@ -110,7 +138,7 @@
       // include mic audio
       if (mic && mic.getAudioTracks().length) mic.getAudioTracks().forEach(t => out.addTrack(t));
 
-      return out;
+      return [out];
     }
 
     function stopAllStreams() {
@@ -138,7 +166,12 @@
 
     startBtn.addEventListener('click', async () => {
       recordedChunks = [];
+      recordedChunksExtra = [];
+      mediaRecorderExtra = null;
+      recordingMimeExtra = null;
+      dateString = null;
       downloadLink.style.display = 'none';
+      downloadLinkExtra.style.display = 'none';
       playbackVideo.style.display = 'none';
       playbackVideo.src = '';
       playbackAudio.style.display = 'none';
@@ -177,7 +210,8 @@
       }
 
       // Build the stream we will feed MediaRecorder
-      mixedStream = buildMixedStream(screenStream, micStream, mode);
+      const mixedStreamTuple = buildMixedStream(screenStream, micStream, mode, combineAudio.checked);
+      mixedStream = mixedStreamTuple[0];
 
       // Show preview for video modes
       if ((mode === 'video' || mode === 'both') && screenStream && screenStream.getVideoTracks().length) {
@@ -193,6 +227,10 @@
 
       try {
         mediaRecorder = new MediaRecorder(mixedStream, recorderOptions);
+        if (mixedStreamTuple.length > 1) {
+          recordingMimeExtra = chooseMimeExtra();
+          mediaRecorderExtra = new MediaRecorder(mixedStreamTuple[1], { mimeType: recordingMimeExtra });
+        }
       } catch (err) {
         updateStatus('MediaRecorder initialization failed: ' + (err && err.message ? err.message : err));
         stopAllStreams();
@@ -233,7 +271,8 @@
 
         // Save
         const ext = (recordingMime && recordingMime.includes("mp4")) ? 'mp4' : 'webm';
-        const suggestedName = `recording-${new Date().toISOString().replace(/[:.]/g,'-')}.${ext}`;
+        dateString = new Date().toISOString().replace(/[:.]/g,'-');
+        const suggestedName = `recording-${dateString}.${ext}`;
         downloadLink.style.display = '';
         downloadLink.href = URL.createObjectURL(blob);
         downloadLink.download = suggestedName;
@@ -243,16 +282,42 @@
         }, 60 * 1000);
       };
 
+      if (mediaRecorderExtra !== null) {
+        mediaRecorderExtra.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) recordedChunksExtra.push(e.data);
+        };
+
+        mediaRecorderExtra.onstop = async () => {
+          const blobExtra = new Blob(recordedChunksExtra, { type: recordingMimeExtra });
+
+          playbackAudio.style.display = '';
+          playbackAudio.src = URL.createObjectURL(blobExtra);
+
+          // Save
+          const extExtra = (recordingMimeExtra && recordingMimeExtra.includes("mp4")) ? 'mp4' : 'webm';
+          const suggestedNameExtra = `recording-microphone-${dateString}.${extExtra}`;
+          downloadLinkExtra.style.display = '';
+          downloadLinkExtra.href = URL.createObjectURL(blobExtra);
+          downloadLinkExtra.download = suggestedNameExtra;
+          //downloadLinkExtra.click();
+          setTimeout(() => {
+            URL.revokeObjectURL(downloadLinkExtra.href);
+          }, 60 * 1000);
+        };
+      }
+
       mediaRecorder.start();
+      if (mediaRecorderExtra !== null) mediaRecorderExtra.start();
     });
 
     stopBtn.addEventListener('click', () => {
-      if (!mediaRecorder) return;
-      if (mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+      if (mediaRecorderExtra && mediaRecorderExtra.state !== 'inactive') mediaRecorderExtra.stop();
     });
 
     window.addEventListener('beforeunload', () => {
       if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+      if (mediaRecorderExtra && mediaRecorderExtra.state !== 'inactive') mediaRecorderExtra.stop();
       stopAllStreams();
     });
   </script>
